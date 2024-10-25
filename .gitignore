@@ -5,3 +5,6 @@ book.txt
 lightrag-dev/
 .idea/
 dist/
+/MyEnv
+/build/lib
+/lib
