@@ -16,6 +16,7 @@ rag = LightRAG(
 
 
 with open("C:\\Users\\Sasha\\Downloads\\paul_graham_essay.txt", 'r', encoding='utf-8') as f:
+
     rag.insert(f.read())
 
 # Perform naive search
