@@ -5,4 +5,5 @@ book.txt
 lightrag-dev/
 .idea/
 dist/
+.venv/
 *.bak
