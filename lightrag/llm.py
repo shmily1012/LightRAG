@@ -7,7 +7,13 @@ import aiohttp
 import numpy as np
 import ollama
 
-from openai import AsyncOpenAI, APIConnectionError, RateLimitError, Timeout, AsyncAzureOpenAI
+from openai import (
+    AsyncOpenAI,
+    APIConnectionError,
+    RateLimitError,
+    Timeout,
+    AsyncAzureOpenAI,
+)
 
 import base64
 import struct
@@ -23,7 +29,11 @@ import torch
 from pydantic import BaseModel, Field
 from typing import List, Dict, Callable, Any
 from .base import BaseKVStorage
-from .utils import compute_args_hash, wrap_embedding_func_with_attrs
+from .utils import (
+    compute_args_hash,
+    wrap_embedding_func_with_attrs,
+    locate_json_string_body_from_string,
+)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -60,36 +70,52 @@ async def openai_complete_if_cache(
         if if_cache_return is not None:
             return if_cache_return["return"]
 
-    response = await openai_async_client.chat.completions.create(
-        model=model, messages=messages, **kwargs
-    )
-
+    if "response_format" in kwargs:
+        response = await openai_async_client.beta.chat.completions.parse(
+            model=model, messages=messages, **kwargs
+        )
+    else:
+        response = await openai_async_client.chat.completions.create(
+            model=model, messages=messages, **kwargs
+        )
+    content = response.choices[0].message.content
+    if r"\u" in content:
+        content = content.encode("utf-8").decode("unicode_escape")
+    # print(content)
     if hashing_kv is not None:
         await hashing_kv.upsert(
             {args_hash: {"return": response.choices[0].message.content, "model": model}}
         )
-    return response.choices[0].message.content
+    return content
+
 
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=10),
     retry=retry_if_exception_type((RateLimitError, APIConnectionError, Timeout)),
 )
-async def azure_openai_complete_if_cache(model,
+async def azure_openai_complete_if_cache(
+    model,
     prompt,
     system_prompt=None,
     history_messages=[],
     base_url=None,
     api_key=None,
-    **kwargs):
+    api_version=None,
+    **kwargs,
+):
     if api_key:
         os.environ["AZURE_OPENAI_API_KEY"] = api_key
     if base_url:
         os.environ["AZURE_OPENAI_ENDPOINT"] = base_url
+    if api_version:
+        os.environ["AZURE_OPENAI_API_VERSION"] = api_version
 
-    openai_async_client = AsyncAzureOpenAI(azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                                           api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-                                           api_version=os.getenv("AZURE_OPENAI_API_VERSION"))
+    openai_async_client = AsyncAzureOpenAI(
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+    )
 
     hashing_kv: BaseKVStorage = kwargs.pop("hashing_kv", None)
     messages = []
@@ -113,6 +139,7 @@ async def azure_openai_complete_if_cache(model,
             {args_hash: {"return": response.choices[0].message.content, "model": model}}
         )
     return response.choices[0].message.content
+
 
 class BedrockError(Exception):
     """Generic error for issues related to Amazon Bedrock"""
@@ -205,6 +232,7 @@ async def bedrock_complete_if_cache(
 
 @lru_cache(maxsize=1)
 def initialize_hf_model(model_name):
+
     hf_tokenizer = AutoTokenizer.from_pretrained(model_name, device_map="auto",  trust_remote_code=True)
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto", device_map="auto", trust_remote_code=True)
     if hf_tokenizer.pad_token is None:
@@ -266,10 +294,14 @@ async def hf_model_if_cache(
     input_ids = hf_tokenizer(
         input_prompt, return_tensors="pt", padding=True, truncation=True
     ).to("cuda")
+    inputs = {k: v.to(hf_model.device) for k, v in input_ids.items()}
     output = hf_model.generate(
         **input_ids, max_new_tokens=1024*32, num_return_sequences=1, early_stopping=True
     )
-    response_text = hf_tokenizer.decode(output[0], skip_special_tokens=True)
+    response_text = hf_tokenizer.decode(
+        output[0][len(inputs["input_ids"][0]) :], skip_special_tokens=True
+
+    )
     if hashing_kv is not None:
         await hashing_kv.upsert({args_hash: {"return": response_text, "model": model}})
     return response_text
@@ -279,9 +311,11 @@ async def ollama_model_if_cache(
     model, prompt, system_prompt=None, history_messages=[], **kwargs
 ) -> str:
     kwargs.pop("max_tokens", None)
-    kwargs.pop("response_format", None)
+    # kwargs.pop("response_format", None) # allow json
+    host = kwargs.pop("host", None)
+    timeout = kwargs.pop("timeout", None)
 
-    ollama_client = ollama.AsyncClient()
+    ollama_client = ollama.AsyncClient(host=host, timeout=timeout)
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -305,9 +339,145 @@ async def ollama_model_if_cache(
     return result
 
 
-async def gpt_4o_complete(
-    prompt, system_prompt=None, history_messages=[], **kwargs
+@lru_cache(maxsize=1)
+def initialize_lmdeploy_pipeline(
+    model,
+    tp=1,
+    chat_template=None,
+    log_level="WARNING",
+    model_format="hf",
+    quant_policy=0,
+):
+    from lmdeploy import pipeline, ChatTemplateConfig, TurbomindEngineConfig
+
+    lmdeploy_pipe = pipeline(
+        model_path=model,
+        backend_config=TurbomindEngineConfig(
+            tp=tp, model_format=model_format, quant_policy=quant_policy
+        ),
+        chat_template_config=(
+            ChatTemplateConfig(model_name=chat_template) if chat_template else None
+        ),
+        log_level="WARNING",
+    )
+    return lmdeploy_pipe
+
+
+async def lmdeploy_model_if_cache(
+    model,
+    prompt,
+    system_prompt=None,
+    history_messages=[],
+    chat_template=None,
+    model_format="hf",
+    quant_policy=0,
+    **kwargs,
 ) -> str:
+    """
+    Args:
+        model (str): The path to the model.
+            It could be one of the following options:
+                    - i) A local directory path of a turbomind model which is
+                        converted by `lmdeploy convert` command or download
+                        from ii) and iii).
+                    - ii) The model_id of a lmdeploy-quantized model hosted
+                        inside a model repo on huggingface.co, such as
+                        "InternLM/internlm-chat-20b-4bit",
+                        "lmdeploy/llama2-chat-70b-4bit", etc.
+                    - iii) The model_id of a model hosted inside a model repo
+                        on huggingface.co, such as "internlm/internlm-chat-7b",
+                        "Qwen/Qwen-7B-Chat ", "baichuan-inc/Baichuan2-7B-Chat"
+                        and so on.
+        chat_template (str): needed when model is a pytorch model on
+            huggingface.co, such as "internlm-chat-7b",
+            "Qwen-7B-Chat ", "Baichuan2-7B-Chat" and so on,
+            and when the model name of local path did not match the original model name in HF.
+        tp (int): tensor parallel
+        prompt (Union[str, List[str]]): input texts to be completed.
+        do_preprocess (bool): whether pre-process the messages. Default to
+            True, which means chat_template will be applied.
+        skip_special_tokens (bool): Whether or not to remove special tokens
+            in the decoding. Default to be True.
+        do_sample (bool): Whether or not to use sampling, use greedy decoding otherwise.
+            Default to be False, which means greedy decoding will be applied.
+    """
+    try:
+        import lmdeploy
+        from lmdeploy import version_info, GenerationConfig
+    except Exception:
+        raise ImportError("Please install lmdeploy before intialize lmdeploy backend.")
+
+    kwargs.pop("response_format", None)
+    max_new_tokens = kwargs.pop("max_tokens", 512)
+    tp = kwargs.pop("tp", 1)
+    skip_special_tokens = kwargs.pop("skip_special_tokens", True)
+    do_preprocess = kwargs.pop("do_preprocess", True)
+    do_sample = kwargs.pop("do_sample", False)
+    gen_params = kwargs
+
+    version = version_info
+    if do_sample is not None and version < (0, 6, 0):
+        raise RuntimeError(
+            "`do_sample` parameter is not supported by lmdeploy until "
+            f"v0.6.0, but currently using lmdeloy {lmdeploy.__version__}"
+        )
+    else:
+        do_sample = True
+        gen_params.update(do_sample=do_sample)
+
+    lmdeploy_pipe = initialize_lmdeploy_pipeline(
+        model=model,
+        tp=tp,
+        chat_template=chat_template,
+        model_format=model_format,
+        quant_policy=quant_policy,
+        log_level="WARNING",
+    )
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+
+    hashing_kv: BaseKVStorage = kwargs.pop("hashing_kv", None)
+    messages.extend(history_messages)
+    messages.append({"role": "user", "content": prompt})
+    if hashing_kv is not None:
+        args_hash = compute_args_hash(model, messages)
+        if_cache_return = await hashing_kv.get_by_id(args_hash)
+        if if_cache_return is not None:
+            return if_cache_return["return"]
+
+    gen_config = GenerationConfig(
+        skip_special_tokens=skip_special_tokens,
+        max_new_tokens=max_new_tokens,
+        **gen_params,
+    )
+
+    response = ""
+    async for res in lmdeploy_pipe.generate(
+        messages,
+        gen_config=gen_config,
+        do_preprocess=do_preprocess,
+        stream_response=False,
+        session_id=1,
+    ):
+        response += res.response
+
+    if hashing_kv is not None:
+        await hashing_kv.upsert({args_hash: {"return": response, "model": model}})
+    return response
+
+
+class GPTKeywordExtractionFormat(BaseModel):
+    high_level_keywords: List[str]
+    low_level_keywords: List[str]
+
+
+async def gpt_4o_complete(
+    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
+) -> str:
+    if keyword_extraction:
+        kwargs["response_format"] = GPTKeywordExtractionFormat
     return await openai_complete_if_cache(
         "gpt-4o",
         prompt,
@@ -318,8 +488,10 @@ async def gpt_4o_complete(
 
 
 async def gpt_4o_mini_complete(
-    prompt, system_prompt=None, history_messages=[], **kwargs
+    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
 ) -> str:
+    if keyword_extraction:
+        kwargs["response_format"] = GPTKeywordExtractionFormat
     return await openai_complete_if_cache(
         "gpt-4o-mini",
         prompt,
@@ -328,45 +500,72 @@ async def gpt_4o_mini_complete(
         **kwargs,
     )
 
-async def azure_openai_complete(
-        prompt, system_prompt=None, history_messages=[], **kwargs
+async def nvidia_openai_complete(
+    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
 ) -> str:
-    return await azure_openai_complete_if_cache(
+    result = await openai_complete_if_cache(
+        "nvidia/llama-3.1-nemotron-70b-instruct", #context length 128k
+        prompt,
+        system_prompt=system_prompt,
+        history_messages=history_messages,
+        base_url="https://integrate.api.nvidia.com/v1",
+        **kwargs,
+    )
+    if keyword_extraction:  # TODO: use JSON API
+        return locate_json_string_body_from_string(result)
+    return result
+
+async def azure_openai_complete(
+    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
+) -> str:
+    result = await azure_openai_complete_if_cache(
         "conversation-4o-mini",
         prompt,
         system_prompt=system_prompt,
         history_messages=history_messages,
         **kwargs,
     )
+    if keyword_extraction:  # TODO: use JSON API
+        return locate_json_string_body_from_string(result)
+    return result
+
 
 async def bedrock_complete(
-    prompt, system_prompt=None, history_messages=[], **kwargs
+    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
 ) -> str:
-    return await bedrock_complete_if_cache(
+    result = await bedrock_complete_if_cache(
         "anthropic.claude-3-haiku-20240307-v1:0",
         prompt,
         system_prompt=system_prompt,
         history_messages=history_messages,
         **kwargs,
     )
+    if keyword_extraction:  # TODO: use JSON API
+        return locate_json_string_body_from_string(result)
+    return result
 
 
 async def hf_model_complete(
-    prompt, system_prompt=None, history_messages=[], **kwargs
+    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
 ) -> str:
     model_name = kwargs["hashing_kv"].global_config["llm_model_name"]
-    return await hf_model_if_cache(
+    result = await hf_model_if_cache(
         model_name,
         prompt,
         system_prompt=system_prompt,
         history_messages=history_messages,
         **kwargs,
     )
+    if keyword_extraction:  # TODO: use JSON API
+        return locate_json_string_body_from_string(result)
+    return result
 
 
 async def ollama_model_complete(
-    prompt, system_prompt=None, history_messages=[], **kwargs
+    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
 ) -> str:
+    if keyword_extraction:
+        kwargs["format"] = "json"
     model_name = kwargs["hashing_kv"].global_config["llm_model_name"]
     return await ollama_model_if_cache(
         model_name,
@@ -401,7 +600,33 @@ async def openai_embedding(
     return np.array([dp.embedding for dp in response.data])
 
 
-@wrap_embedding_func_with_attrs(embedding_dim=1536, max_token_size=8192)
+@wrap_embedding_func_with_attrs(embedding_dim=2048, max_token_size=512)
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=60),
+    retry=retry_if_exception_type((RateLimitError, APIConnectionError, Timeout)),
+)
+async def nvidia_openai_embedding(
+    texts: list[str],
+    model: str = "nvidia/llama-3.2-nv-embedqa-1b-v1", #refer to https://build.nvidia.com/nim?filters=usecase%3Ausecase_text_to_embedding
+    base_url: str = "https://integrate.api.nvidia.com/v1",
+    api_key: str = None,
+    input_type: str = "passage", #query for retrieval, passage for embedding
+    trunc: str = "NONE", #NONE or START or END
+    encode: str = "float" #float or base64
+) -> np.ndarray:
+    if api_key:
+        os.environ["OPENAI_API_KEY"] = api_key
+
+    openai_async_client = (
+        AsyncOpenAI() if base_url is None else AsyncOpenAI(base_url=base_url)
+    )
+    response = await openai_async_client.embeddings.create(
+        model=model, input=texts, encoding_format=encode, extra_body={"input_type": input_type, "truncate": trunc}
+    )
+    return np.array([dp.embedding for dp in response.data])
+
+@wrap_embedding_func_with_attrs(embedding_dim=1536, max_token_size=8191)
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -412,15 +637,20 @@ async def azure_openai_embedding(
     model: str = "text-embedding-3-small",
     base_url: str = None,
     api_key: str = None,
+    api_version: str = None,
 ) -> np.ndarray:
     if api_key:
         os.environ["AZURE_OPENAI_API_KEY"] = api_key
     if base_url:
         os.environ["AZURE_OPENAI_ENDPOINT"] = base_url
+    if api_version:
+        os.environ["AZURE_OPENAI_API_VERSION"] = api_version
 
-    openai_async_client = AsyncAzureOpenAI(azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                                           api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-                                           api_version=os.getenv("AZURE_OPENAI_API_VERSION"))
+    openai_async_client = AsyncAzureOpenAI(
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+    )
 
     response = await openai_async_client.embeddings.create(
         model=model, input=texts, encoding_format="float"
@@ -440,35 +670,28 @@ async def siliconcloud_embedding(
     max_token_size: int = 512,
     api_key: str = None,
 ) -> np.ndarray:
-    if api_key and not api_key.startswith('Bearer '):
-        api_key = 'Bearer ' + api_key
+    if api_key and not api_key.startswith("Bearer "):
+        api_key = "Bearer " + api_key
 
-    headers = {
-        "Authorization": api_key,
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": api_key, "Content-Type": "application/json"}
 
     truncate_texts = [text[0:max_token_size] for text in texts]
 
-    payload = {
-        "model": model,
-        "input": truncate_texts,
-        "encoding_format": "base64"
-    }
+    payload = {"model": model, "input": truncate_texts, "encoding_format": "base64"}
 
     base64_strings = []
     async with aiohttp.ClientSession() as session:
         async with session.post(base_url, headers=headers, json=payload) as response:
             content = await response.json()
-            if 'code' in content:
+            if "code" in content:
                 raise ValueError(content)
-            base64_strings = [item['embedding'] for item in content['data']]
-    
+            base64_strings = [item["embedding"] for item in content["data"]]
+
     embeddings = []
     for string in base64_strings:
         decode_bytes = base64.b64decode(string)
         n = len(decode_bytes) // 4
-        float_array = struct.unpack('<' + 'f' * n, decode_bytes)
+        float_array = struct.unpack("<" + "f" * n, decode_bytes)
         embeddings.append(float_array)
     return np.array(embeddings)
 
@@ -546,22 +769,37 @@ async def bedrock_embedding(
 
 
 async def hf_embedding(texts: list[str], tokenizer, embed_model) -> np.ndarray:
+    device = next(embed_model.parameters()).device
     input_ids = tokenizer(
         texts, return_tensors="pt", padding=True, truncation=True
-    ).input_ids
+    ).input_ids.to(device)
     with torch.no_grad():
         outputs = embed_model(input_ids)
         embeddings = outputs.last_hidden_state.mean(dim=1)
-    return embeddings.detach().numpy()
+    if embeddings.dtype == torch.bfloat16:
+        return embeddings.detach().to(torch.float32).cpu().numpy()
+    else:
+        return embeddings.detach().cpu().numpy()
 
 
-async def ollama_embedding(texts: list[str], embed_model) -> np.ndarray:
+async def ollama_embedding(texts: list[str], embed_model, **kwargs) -> np.ndarray:
+    """
+    Deprecated in favor of `embed`.
+    """
     embed_text = []
+    ollama_client = ollama.Client(**kwargs)
     for text in texts:
-        data = ollama.embeddings(model=embed_model, prompt=text)
+        data = ollama_client.embeddings(model=embed_model, prompt=text)
         embed_text.append(data["embedding"])
 
     return embed_text
+
+
+async def ollama_embed(texts: list[str], embed_model, **kwargs) -> np.ndarray:
+    ollama_client = ollama.Client(**kwargs)
+    data = ollama_client.embed(model=embed_model, input=texts)
+    return data["embeddings"]
+
 
 class Model(BaseModel):
     """
@@ -580,14 +818,20 @@ class Model(BaseModel):
     The 'kwargs' dictionary contains the model name and API key to be passed to the function.
     """
 
-    gen_func: Callable[[Any], str] = Field(..., description="A function that generates the response from the llm. The response must be a string")
-    kwargs: Dict[str, Any] = Field(..., description="The arguments to pass to the callable function. Eg. the api key, model name, etc")
+    gen_func: Callable[[Any], str] = Field(
+        ...,
+        description="A function that generates the response from the llm. The response must be a string",
+    )
+    kwargs: Dict[str, Any] = Field(
+        ...,
+        description="The arguments to pass to the callable function. Eg. the api key, model name, etc",
+    )
 
     class Config:
         arbitrary_types_allowed = True
 
 
-class MultiModel():
+class MultiModel:
     """
     Distributes the load across multiple language models. Useful for circumventing low rate limits with certain api providers especially if you are on the free tier.
     Could also be used for spliting across diffrent models or providers.
@@ -611,25 +855,30 @@ class MultiModel():
             )
         ```
     """
+
     def __init__(self, models: List[Model]):
         self._models = models
         self._current_model = 0
-        
+
     def _next_model(self):
         self._current_model = (self._current_model + 1) % len(self._models)
         return self._models[self._current_model]
 
     async def llm_model_func(
-        self,
-        prompt, system_prompt=None, history_messages=[], **kwargs
+        self, prompt, system_prompt=None, history_messages=[], **kwargs
     ) -> str:
-        kwargs.pop("model", None) # stop from overwriting the custom model name
+        kwargs.pop("model", None)  # stop from overwriting the custom model name
         next_model = self._next_model()
-        args = dict(prompt=prompt, system_prompt=system_prompt, history_messages=history_messages, **kwargs, **next_model.kwargs)
-
-        return await next_model.gen_func(
-            **args
+        args = dict(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            history_messages=history_messages,
+            **kwargs,
+            **next_model.kwargs,
         )
+
+        return await next_model.gen_func(**args)
+
 
 if __name__ == "__main__":
     import asyncio
