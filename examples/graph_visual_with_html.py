@@ -5,6 +5,7 @@ import random
 # Load the GraphML file
 G = nx.read_graphml("./dickens/graph_chunk_entity_relation.graphml")
 
+
 # Create a Pyvis network
 net = Network(height="100vh", notebook=True)
 
