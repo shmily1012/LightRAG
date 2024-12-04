@@ -17,9 +17,12 @@ T = TypeVar("T")
 class QueryParam:
     mode: Literal["local", "global", "hybrid", "naive"] = "global"
     only_need_context: bool = False
+    only_need_prompt: bool = False
     response_type: str = "Multiple Paragraphs"
     # Number of top-k items to retrieve; corresponds to entities in "local" mode and relationships in "global" mode.
     top_k: int = 60
+    # Number of document chunks to retrieve.
+    # top_n: int = 10
     # Number of tokens for the original chunks.
     max_token_for_text_unit: int = 4000
     # Number of tokens for the relationship descriptions
@@ -59,6 +62,8 @@ class BaseVectorStorage(StorageNameSpace):
 
 @dataclass
 class BaseKVStorage(Generic[T], StorageNameSpace):
+    embedding_func: EmbeddingFunc
+
     async def all_keys(self) -> list[str]:
         raise NotImplementedError
 
@@ -83,6 +88,8 @@ class BaseKVStorage(Generic[T], StorageNameSpace):
 
 @dataclass
 class BaseGraphStorage(StorageNameSpace):
+    embedding_func: EmbeddingFunc = None
+
     async def has_node(self, node_id: str) -> bool:
         raise NotImplementedError
 
@@ -116,7 +123,7 @@ class BaseGraphStorage(StorageNameSpace):
     ):
         raise NotImplementedError
 
-    async def clustering(self, algorithm: str):
+    async def delete_node(self, node_id: str):
         raise NotImplementedError
 
     async def embed_nodes(self, algorithm: str) -> tuple[np.ndarray, list[str]]:

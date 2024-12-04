@@ -5,5 +5,13 @@ book.txt
 lightrag-dev/
 .idea/
 dist/
+env/
+local_neo4jWorkDir/
+neo4jWorkDir/
+ignore_this.txt
 .venv/
 *.bak
+*.ignore.*
+.ruff_cache/
+gui/
+*.log

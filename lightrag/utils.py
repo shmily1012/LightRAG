@@ -1,5 +1,7 @@
 import asyncio
 import html
+import io
+import csv
 import json
 import logging
 import os
@@ -7,7 +9,7 @@ import re
 from dataclasses import dataclass
 from functools import wraps
 from hashlib import md5
-from typing import Any, Union
+from typing import Any, Union, List
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -45,10 +47,27 @@ class EmbeddingFunc:
 
 def locate_json_string_body_from_string(content: str) -> Union[str, None]:
     """Locate the JSON string body from a string"""
-    maybe_json_str = re.search(r"{.*}", content, re.DOTALL)
-    if maybe_json_str is not None:
-        return maybe_json_str.group(0)
-    else:
+    try:
+        maybe_json_str = re.search(r"{.*}", content, re.DOTALL)
+        if maybe_json_str is not None:
+            maybe_json_str = maybe_json_str.group(0)
+            maybe_json_str = maybe_json_str.replace("\\n", "")
+            maybe_json_str = maybe_json_str.replace("\n", "")
+            maybe_json_str = maybe_json_str.replace("'", '"')
+            # json.loads(maybe_json_str) # don't check here, cannot validate schema after all
+            return maybe_json_str
+    except Exception:
+        pass
+        # try:
+        #     content = (
+        #         content.replace(kw_prompt[:-1], "")
+        #         .replace("user", "")
+        #         .replace("model", "")
+        #         .strip()
+        #     )
+        #     maybe_json_str = "{" + content.split("{")[1].split("}")[0] + "}"
+        #     json.loads(maybe_json_str)
+
         return None
 
 
@@ -175,10 +194,17 @@ def truncate_list_by_token_size(list_data: list, key: callable, max_token_size: 
     return list_data
 
 
-def list_of_list_to_csv(data: list[list]):
-    return "\n".join(
-        [",\t".join([str(data_dd) for data_dd in data_d]) for data_d in data]
-    )
+def list_of_list_to_csv(data: List[List[str]]) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerows(data)
+    return output.getvalue()
+
+
+def csv_string_to_list(csv_string: str) -> List[List[str]]:
+    output = io.StringIO(csv_string)
+    reader = csv.reader(output)
+    return [row for row in reader]
 
 
 def save_data_to_file(data, file_name):
@@ -244,3 +270,40 @@ def xml_to_json(xml_file):
     except Exception as e:
         print(f"An error occurred: {e}")
         return None
+
+
+def process_combine_contexts(hl, ll):
+    header = None
+    list_hl = csv_string_to_list(hl.strip())
+    list_ll = csv_string_to_list(ll.strip())
+
+    if list_hl:
+        header = list_hl[0]
+        list_hl = list_hl[1:]
+    if list_ll:
+        header = list_ll[0]
+        list_ll = list_ll[1:]
+    if header is None:
+        return ""
+
+    if list_hl:
+        list_hl = [",".join(item[1:]) for item in list_hl if item]
+    if list_ll:
+        list_ll = [",".join(item[1:]) for item in list_ll if item]
+
+    combined_sources = []
+    seen = set()
+
+    for item in list_hl + list_ll:
+        if item and item not in seen:
+            combined_sources.append(item)
+            seen.add(item)
+
+    combined_sources_result = [",\t".join(header)]
+
+    for i, item in enumerate(combined_sources, start=1):
+        combined_sources_result.append(f"{i},\t{item}")
+
+    combined_sources_result = "\n".join(combined_sources_result)
+
+    return combined_sources_result
