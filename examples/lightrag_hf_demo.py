@@ -16,6 +16,9 @@ EMBED_MODEL_NAME = '/home/chizhang/temp_folder/all-MiniLM-L12-v2'
 
 rag = LightRAG(
     working_dir=WORKING_DIR,
+    chunk_token_size=10000,
+    chunk_overlap_token_size=1000,
+    entity_summary_to_max_tokens=2500,
     llm_model_func=hf_model_complete,
     llm_model_name=LLM_MODEL_NAME,
     embedding_func=EmbeddingFunc(
