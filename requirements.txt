@@ -11,6 +11,8 @@ networkx
 ollama
 openai
 oracledb
+pymilvus
+pymongo
 pyvis
 tenacity
 # lmdeploy[all]

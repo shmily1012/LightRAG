@@ -40,15 +40,35 @@ from .storage import (
     NetworkXStorage,
 )
 
-from .kg.neo4j_impl import Neo4JStorage
-
-from .kg.oracle_impl import OracleKVStorage, OracleGraphStorage, OracleVectorDBStorage
-
 # future KG integrations
 
 # from .kg.ArangoDB_impl import (
 #     GraphStorage as ArangoDBStorage
 # )
+
+
+def lazy_external_import(module_name: str, class_name: str):
+    """Lazily import an external module and return a class from it."""
+
+    def import_class():
+        import importlib
+
+        # Import the module using importlib
+        module = importlib.import_module(module_name)
+
+        # Get the class from the module
+        return getattr(module, class_name)
+
+    # Return the import_class function itself, not its result
+    return import_class
+
+
+Neo4JStorage = lazy_external_import(".kg.neo4j_impl", "Neo4JStorage")
+OracleKVStorage = lazy_external_import(".kg.oracle_impl", "OracleKVStorage")
+OracleGraphStorage = lazy_external_import(".kg.oracle_impl", "OracleGraphStorage")
+OracleVectorDBStorage = lazy_external_import(".kg.oracle_impl", "OracleVectorDBStorage")
+MilvusVectorDBStorge = lazy_external_import(".kg.milvus_impl", "MilvusVectorDBStorge")
+MongoKVStorage = lazy_external_import(".kg.mongo_impl", "MongoKVStorage")
 
 
 def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
@@ -64,7 +84,7 @@ def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
     try:
         # Try to get the current event loop
         current_loop = asyncio.get_event_loop()
-        if current_loop._closed:
+        if current_loop.is_closed():
             raise RuntimeError("Event loop is closed.")
         return current_loop
 
@@ -81,7 +101,14 @@ class LightRAG:
     working_dir: str = field(
         default_factory=lambda: f"./lightrag_cache_{datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}"
     )
-
+    # Default not to use embedding cache
+    embedding_cache_config: dict = field(
+        default_factory=lambda: {
+            "enabled": False,
+            "similarity_threshold": 0.95,
+            "use_llm_check": False,
+        }
+    )
     kv_storage: str = field(default="JsonKVStorage")
     vector_storage: str = field(default="NanoVectorDBStorage")
     graph_storage: str = field(default="NetworkXStorage")
@@ -167,7 +194,6 @@ class LightRAG:
             if self.enable_llm_cache
             else None
         )
-
         self.embedding_func = limit_async_func_call(self.embedding_func_max_async)(
             self.embedding_func
         )
@@ -225,9 +251,11 @@ class LightRAG:
             # kv storage
             "JsonKVStorage": JsonKVStorage,
             "OracleKVStorage": OracleKVStorage,
+            "MongoKVStorage": MongoKVStorage,
             # vector storage
             "NanoVectorDBStorage": NanoVectorDBStorage,
             "OracleVectorDBStorage": OracleVectorDBStorage,
+            "MilvusVectorDBStorge": MilvusVectorDBStorge,
             # graph storage
             "NetworkXStorage": NetworkXStorage,
             "Neo4JStorage": Neo4JStorage,
@@ -329,13 +357,39 @@ class LightRAG:
     async def ainsert_custom_kg(self, custom_kg: dict):
         update_storage = False
         try:
+            # Insert chunks into vector storage
+            all_chunks_data = {}
+            chunk_to_source_map = {}
+            for chunk_data in custom_kg.get("chunks", []):
+                chunk_content = chunk_data["content"]
+                source_id = chunk_data["source_id"]
+                chunk_id = compute_mdhash_id(chunk_content.strip(), prefix="chunk-")
+
+                chunk_entry = {"content": chunk_content.strip(), "source_id": source_id}
+                all_chunks_data[chunk_id] = chunk_entry
+                chunk_to_source_map[source_id] = chunk_id
+                update_storage = True
+
+            if self.chunks_vdb is not None and all_chunks_data:
+                await self.chunks_vdb.upsert(all_chunks_data)
+            if self.text_chunks is not None and all_chunks_data:
+                await self.text_chunks.upsert(all_chunks_data)
+
             # Insert entities into knowledge graph
             all_entities_data = []
             for entity_data in custom_kg.get("entities", []):
                 entity_name = f'"{entity_data["entity_name"].upper()}"'
                 entity_type = entity_data.get("entity_type", "UNKNOWN")
                 description = entity_data.get("description", "No description provided")
-                source_id = entity_data["source_id"]
+                # source_id = entity_data["source_id"]
+                source_chunk_id = entity_data.get("source_id", "UNKNOWN")
+                source_id = chunk_to_source_map.get(source_chunk_id, "UNKNOWN")
+
+                # Log if source_id is UNKNOWN
+                if source_id == "UNKNOWN":
+                    logger.warning(
+                        f"Entity '{entity_name}' has an UNKNOWN source_id. Please check the source mapping."
+                    )
 
                 # Prepare node data
                 node_data = {
@@ -359,7 +413,15 @@ class LightRAG:
                 description = relationship_data["description"]
                 keywords = relationship_data["keywords"]
                 weight = relationship_data.get("weight", 1.0)
-                source_id = relationship_data["source_id"]
+                # source_id = relationship_data["source_id"]
+                source_chunk_id = relationship_data.get("source_id", "UNKNOWN")
+                source_id = chunk_to_source_map.get(source_chunk_id, "UNKNOWN")
+
+                # Log if source_id is UNKNOWN
+                if source_id == "UNKNOWN":
+                    logger.warning(
+                        f"Relationship from '{src_id}' to '{tgt_id}' has an UNKNOWN source_id. Please check the source mapping."
+                    )
 
                 # Check if nodes exist in the knowledge graph
                 for need_insert_id in [src_id, tgt_id]:
@@ -438,6 +500,7 @@ class LightRAG:
                 self.text_chunks,
                 param,
                 asdict(self),
+                hashing_kv=self.llm_response_cache,
             )
         elif param.mode == "naive":
             response = await naive_query(
@@ -446,6 +509,7 @@ class LightRAG:
                 self.text_chunks,
                 param,
                 asdict(self),
+                hashing_kv=self.llm_response_cache,
             )
         else:
             raise ValueError(f"Unknown mode {param.mode}")
