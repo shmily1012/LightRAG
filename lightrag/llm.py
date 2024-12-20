@@ -18,6 +18,8 @@ from openai import (
     Timeout,
     AsyncAzureOpenAI,
 )
+from llama_cpp import Llama
+
 from pydantic import BaseModel, Field
 from tenacity import (
     retry,
@@ -221,10 +223,47 @@ async def bedrock_complete_if_cache(
 
 
 @lru_cache(maxsize=1)
+def initialize_llama_cpp_model(model_name):
+    return Llama(model_name, n_gpu_layers=-1, n_ctx=32 * 1024)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+    retry=retry_if_exception_type((RateLimitError, APIConnectionError, Timeout)),
+)
+async def llama_cpp_model_if_cache(
+    model_name,
+    prompt,
+    system_prompt=None,
+    history_messages=[],
+    **kwargs,
+) -> str:
+    _model = initialize_llama_cpp_model(model_name)
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.extend(history_messages)
+    messages.append({"role": "user", "content": prompt})
+    kwargs.pop("hashing_kv", None)
+    output = _model.create_chat_completion(
+        messages,
+        max_tokens=kwargs.get("max_tokens", 1024 * 32),
+        temperature=kwargs.get("temperature", 0.7),
+        top_p=kwargs.get("top_p", 0.95),
+    )
+    return output["choices"][0]["message"]["content"].strip()
+
+
+@lru_cache(maxsize=1)
 def initialize_hf_model(model_name):
 
-    hf_tokenizer = AutoTokenizer.from_pretrained(model_name, device_map="auto",  trust_remote_code=True)
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto", device_map="auto", trust_remote_code=True)
+    hf_tokenizer = AutoTokenizer.from_pretrained(
+        model_name, device_map="auto", trust_remote_code=True
+    )
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        model_name, torch_dtype="auto", device_map="auto", trust_remote_code=True
+    )
     if hf_tokenizer.pad_token is None:
         hf_tokenizer.pad_token = hf_tokenizer.eos_token
 
@@ -289,11 +328,13 @@ async def hf_model_if_cache(
     ).to("cuda")
     inputs = {k: v.to(hf_model.device) for k, v in input_ids.items()}
     output = hf_model.generate(
-        **input_ids, max_new_tokens=1024*32, num_return_sequences=1, early_stopping=True
+        **input_ids,
+        max_new_tokens=1024 * 32,
+        num_return_sequences=1,
+        early_stopping=True,
     )
     response_text = hf_tokenizer.decode(
         output[0][len(inputs["input_ids"][0]) :], skip_special_tokens=True
-
     )
 
     return response_text
@@ -561,6 +602,22 @@ async def bedrock_complete(
         return locate_json_string_body_from_string(result)
     return result
 
+async def llama_cpp_model_complete(
+    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
+) -> str:
+    keyword_extraction = kwargs.pop("keyword_extraction", None)
+    model_name = kwargs["hashing_kv"].global_config["llm_model_name"]
+    result = await llama_cpp_model_if_cache(
+        model_name,
+        prompt,
+        system_prompt=system_prompt,
+        history_messages=history_messages,
+        **kwargs,
+    )
+    if keyword_extraction:  # TODO: use JSON API (llama cpp has a way to call json api)
+        print("use JSON Method...")
+        return locate_json_string_body_from_string(result)
+    return result
 
 async def hf_model_complete(
     prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
@@ -575,6 +632,7 @@ async def hf_model_complete(
         **kwargs,
     )
     if keyword_extraction:  # TODO: use JSON API
+        print("use JSON Method...")
         return locate_json_string_body_from_string(result)
     return result
 
