@@ -445,8 +445,9 @@ async def lollms_model_if_cache(
     full_prompt += prompt
 
     request_data["prompt"] = full_prompt
+    timeout = aiohttp.ClientTimeout(total=kwargs.get("timeout", None))
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         if stream:
 
             async def inner():
@@ -660,11 +661,11 @@ async def nvidia_openai_complete(
 
 
 async def azure_openai_complete(
-    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
+    model: str = "gpt-4o-mini", prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
 ) -> str:
     keyword_extraction = kwargs.pop("keyword_extraction", None)
     result = await azure_openai_complete_if_cache(
-        "conversation-4o-mini",
+        model,
         prompt,
         system_prompt=system_prompt,
         history_messages=history_messages,
@@ -798,7 +799,7 @@ async def zhipu_complete_if_cache(
     messages = []
 
     if not system_prompt:
-        system_prompt = "You are a helpful assistant. 注意内容里的敏感词用***替换。"
+        system_prompt = "You are a helpful assistant. Note that sensitive words in the content should be replaced with ***"
 
     # Add system prompt if provided
     if system_prompt:

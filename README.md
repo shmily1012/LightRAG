@@ -26,7 +26,8 @@ This repository hosts the code of LightRAG. The structure of this code is based 
 </div>
 
 ## 🎉 News
-- [x] [2025.01.06]🎯📢LightRAG now supports [PostgreSQL for Storage](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#using-postgres-for-storage).
+- [x] [2025.01.13]🎯📢Our team has released [MiniRAG](https://github.com/HKUDS/MiniRAG) making RAG simpler with small models.
+- [x] [2025.01.06]🎯📢You can now [use PostgreSQL for Storage](#using-postgresql-for-storage).
 - [x] [2024.12.31]🎯📢LightRAG now supports [deletion by document ID](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#delete).
 - [x] [2024.11.25]🎯📢LightRAG now supports seamless integration of [custom knowledge graphs](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#insert-custom-kg), empowering users to enhance the system with their own domain expertise.
 - [x] [2024.11.19]🎯📢A comprehensive guide to LightRAG is now available on [LearnOpenCV](https://learnopencv.com/lightrag). Many thanks to the blog author.
@@ -329,6 +330,26 @@ rag = LightRAG(
 with open("./newText.txt") as f:
     rag.insert(f.read())
 ```
+### Separate Keyword Extraction
+We've introduced a new function `query_with_separate_keyword_extraction` to enhance the keyword extraction capabilities. This function separates the keyword extraction process from the user's prompt, focusing solely on the query to improve the relevance of extracted keywords.
+
+##### How It Works?
+The function operates by dividing the input into two parts:
+- `User Query`
+- `Prompt`
+
+It then performs keyword extraction exclusively on the `user query`. This separation ensures that the extraction process is focused and relevant, unaffected by any additional language in the `prompt`. It also allows the `prompt` to serve purely for response formatting, maintaining the intent and clarity of the user's original question.
+
+##### Usage Example
+This `example` shows how to tailor the function for educational content, focusing on detailed explanations for older students.
+
+```python
+rag.query_with_separate_keyword_extraction(
+    query="Explain the law of gravity",
+    prompt="Provide a detailed explanation suitable for high school students studying physics.",
+    param=QueryParam(mode="hybrid")
+)
+```
 
 ### Using Neo4J for Storage
 
@@ -360,7 +381,20 @@ see test_neo4j.py for a working example.
 ### Using PostgreSQL for Storage
 For production level scenarios you will most likely want to leverage an enterprise solution. PostgreSQL can provide a one-stop solution for you as KV store, VectorDB (pgvector) and GraphDB (apache AGE).
 * PostgreSQL is lightweight,the whole binary distribution including all necessary plugins can be zipped to 40MB: Ref to [Windows Release](https://github.com/ShanGor/apache-age-windows/releases/tag/PG17%2Fv1.5.0-rc0) as it is easy to install for Linux/Mac.
+* If you prefer docker, please start with this image if you are a beginner to avoid hiccups (DO read the overview): https://hub.docker.com/r/shangor/postgres-for-rag
 * How to start? Ref to: [examples/lightrag_zhipu_postgres_demo.py](https://github.com/HKUDS/LightRAG/blob/main/examples/lightrag_zhipu_postgres_demo.py)
+* Create index for AGE example: (Change below `dickens` to your graph name if necessary)
+  ```
+  SET search_path = ag_catalog, "$user", public;
+  CREATE INDEX idx_entity ON dickens."Entity" USING gin (agtype_access_operator(properties, '"node_id"'));
+  ```
+* Known issue of the Apache AGE: The released versions got below issue:
+  > You might find that the properties of the nodes/edges are empty.
+  > It is a known issue of the release version: https://github.com/apache/age/pull/1721
+  >
+  > You can Compile the AGE from source code and fix it.
+
+
 
 ### Insert Custom KG
 
@@ -682,7 +716,7 @@ Output the results in the following structure:
 ```
 </details>
 
- ### Batch Eval
+### Batch Eval
 To evaluate the performance of two RAG systems on high-level queries, LightRAG uses the following prompt, with the specific code available in `example/batch_eval.py`.
 
 <details>
@@ -733,6 +767,7 @@ Output your evaluation in the following JSON format:
 </details>
 
 ### Overall Performance Table
+
 |                      | **Agriculture**         |                       | **CS**                |                       | **Legal**             |                       | **Mix**               |                       |
 |----------------------|-------------------------|-----------------------|-----------------------|-----------------------|-----------------------|-----------------------|-----------------------|-----------------------|
 |                      | NaiveRAG                | **LightRAG**          | NaiveRAG              | **LightRAG**          | NaiveRAG              | **LightRAG**          | NaiveRAG              | **LightRAG**          |
@@ -887,360 +922,10 @@ def extract_queries(file_path):
 ```
 </details>
 
-## Install with API Support
+## API
+LightRag can be installed with API support to serve a Fast api interface to perform data upload and indexing/Rag operations/Rescan of the input folder etc..
 
-LightRAG provides optional API support through FastAPI servers that add RAG capabilities to existing LLM services. You can install LightRAG with API support in two ways:
-
-### 1. Installation from PyPI
-
-```bash
-pip install "lightrag-hku[api]"
-```
-
-### 2. Installation from Source (Development)
-
-```bash
-# Clone the repository
-git clone https://github.com/HKUDS/lightrag.git
-
-# Change to the repository directory
-cd lightrag
-
-# Install in editable mode with API support
-pip install -e ".[api]"
-```
-
-### Prerequisites
-
-Before running any of the servers, ensure you have the corresponding backend service running:
-
-#### For LoLLMs Server
-- LoLLMs must be running and accessible
-- Default connection: http://localhost:9600
-- Configure using --lollms-host if running on a different host/port
-
-#### For Ollama Server
-- Ollama must be running and accessible
-- Default connection: http://localhost:11434
-- Configure using --ollama-host if running on a different host/port
-
-#### For OpenAI Server
-- Requires valid OpenAI API credentials set in environment variables
-- OPENAI_API_KEY must be set
-
-#### For Azure OpenAI Server
-Azure OpenAI API can be created using the following commands in Azure CLI (you need to install Azure CLI first from [https://docs.microsoft.com/en-us/cli/azure/install-azure-cli](https://docs.microsoft.com/en-us/cli/azure/install-azure-cli)):
-```bash
-# Change the resource group name, location and OpenAI resource name as needed
-RESOURCE_GROUP_NAME=LightRAG
-LOCATION=swedencentral
-RESOURCE_NAME=LightRAG-OpenAI
-
-az login
-az group create --name $RESOURCE_GROUP_NAME --location $LOCATION
-az cognitiveservices account create --name $RESOURCE_NAME --resource-group $RESOURCE_GROUP_NAME  --kind OpenAI --sku S0 --location swedencentral
-az cognitiveservices account deployment create --resource-group $RESOURCE_GROUP_NAME  --model-format OpenAI --name $RESOURCE_NAME --deployment-name gpt-4o --model-name gpt-4o --model-version "2024-08-06"  --sku-capacity 100 --sku-name "Standard"
-az cognitiveservices account deployment create --resource-group $RESOURCE_GROUP_NAME  --model-format OpenAI --name $RESOURCE_NAME --deployment-name text-embedding-3-large --model-name text-embedding-3-large --model-version "1"  --sku-capacity 80 --sku-name "Standard"
-az cognitiveservices account show --name $RESOURCE_NAME --resource-group $RESOURCE_GROUP_NAME --query "properties.endpoint"
-az cognitiveservices account keys list --name $RESOURCE_NAME -g $RESOURCE_GROUP_NAME
-
-```
-The output of the last command will give you the endpoint and the key for the OpenAI API. You can use these values to set the environment variables in the `.env` file.
-
-
-
-### Configuration Options
-
-Each server has its own specific configuration options:
-
-#### LoLLMs Server Options
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| --host | 0.0.0.0 | RAG server host |
-| --port | 9621 | RAG server port |
-| --model | mistral-nemo:latest | LLM model name |
-| --embedding-model | bge-m3:latest | Embedding model name |
-| --lollms-host | http://localhost:9600 | LoLLMS backend URL |
-| --working-dir | ./rag_storage | Working directory for RAG |
-| --max-async | 4 | Maximum async operations |
-| --max-tokens | 32768 | Maximum token size |
-| --embedding-dim | 1024 | Embedding dimensions |
-| --max-embed-tokens | 8192 | Maximum embedding token size |
-| --input-file | ./book.txt | Initial input file |
-| --log-level | INFO | Logging level |
-| --key | none | Access Key to protect the lightrag service |
-
-#### Ollama Server Options
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| --host | 0.0.0.0 | RAG server host |
-| --port | 9621 | RAG server port |
-| --model | mistral-nemo:latest | LLM model name |
-| --embedding-model | bge-m3:latest | Embedding model name |
-| --ollama-host | http://localhost:11434 | Ollama backend URL |
-| --working-dir | ./rag_storage | Working directory for RAG |
-| --max-async | 4 | Maximum async operations |
-| --max-tokens | 32768 | Maximum token size |
-| --embedding-dim | 1024 | Embedding dimensions |
-| --max-embed-tokens | 8192 | Maximum embedding token size |
-| --input-file | ./book.txt | Initial input file |
-| --log-level | INFO | Logging level |
-| --key | none | Access Key to protect the lightrag service |
-
-#### OpenAI Server Options
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| --host | 0.0.0.0 | RAG server host |
-| --port | 9621 | RAG server port |
-| --model | gpt-4 | OpenAI model name |
-| --embedding-model | text-embedding-3-large | OpenAI embedding model |
-| --working-dir | ./rag_storage | Working directory for RAG |
-| --max-tokens | 32768 | Maximum token size |
-| --max-embed-tokens | 8192 | Maximum embedding token size |
-| --input-dir | ./inputs | Input directory for documents |
-| --log-level | INFO | Logging level |
-| --key | none | Access Key to protect the lightrag service |
-
-#### OpenAI AZURE Server Options
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| --host | 0.0.0.0 | Server host |
-| --port | 9621 | Server port |
-| --model | gpt-4 | OpenAI model name |
-| --embedding-model | text-embedding-3-large | OpenAI embedding model |
-| --working-dir | ./rag_storage | Working directory for RAG |
-| --max-tokens | 32768 | Maximum token size |
-| --max-embed-tokens | 8192 | Maximum embedding token size |
-| --input-dir | ./inputs | Input directory for documents |
-| --enable-cache | True | Enable response cache |
-| --log-level | INFO | Logging level |
-| --key | none | Access Key to protect the lightrag service |
-
-
-For protecting the server using an authentication key, you can also use an environment variable named `LIGHTRAG_API_KEY`.
-### Example Usage
-
-#### LoLLMs RAG Server
-
-```bash
-# Custom configuration with specific model and working directory
-lollms-lightrag-server --model mistral-nemo --port 8080 --working-dir ./custom_rag
-
-# Using specific models (ensure they are installed in your LoLLMs instance)
-lollms-lightrag-server --model mistral-nemo:latest --embedding-model bge-m3 --embedding-dim 1024
-
-# Using specific models and an authentication key
-lollms-lightrag-server --model mistral-nemo:latest --embedding-model bge-m3 --embedding-dim 1024 --key ky-mykey
-
-```
-
-#### Ollama RAG Server
-
-```bash
-# Custom configuration with specific model and working directory
-ollama-lightrag-server --model mistral-nemo:latest --port 8080 --working-dir ./custom_rag
-
-# Using specific models (ensure they are installed in your Ollama instance)
-ollama-lightrag-server --model mistral-nemo:latest --embedding-model bge-m3 --embedding-dim 1024
-```
-
-#### OpenAI RAG Server
-
-```bash
-# Using GPT-4 with text-embedding-3-large
-openai-lightrag-server --port 9624 --model gpt-4 --embedding-model text-embedding-3-large
-```
-#### Azure OpenAI RAG Server
-```bash
-# Using GPT-4 with text-embedding-3-large
-azure-openai-lightrag-server --model gpt-4o --port 8080 --working-dir ./custom_rag --embedding-model text-embedding-3-large
-```
-
-
-**Important Notes:**
-- For LoLLMs: Make sure the specified models are installed in your LoLLMs instance
-- For Ollama: Make sure the specified models are installed in your Ollama instance
-- For OpenAI: Ensure you have set up your OPENAI_API_KEY environment variable
-- For Azure OpenAI: Build and configure your server as stated in the Prequisites section
-
-For help on any server, use the --help flag:
-```bash
-lollms-lightrag-server --help
-ollama-lightrag-server --help
-openai-lightrag-server --help
-azure-openai-lightrag-server --help
-```
-
-Note: If you don't need the API functionality, you can install the base package without API support using:
-```bash
-pip install lightrag-hku
-```
-
-## API Endpoints
-
-All servers (LoLLMs, Ollama, OpenAI and Azure OpenAI) provide the same REST API endpoints for RAG functionality.
-
-### Query Endpoints
-
-#### POST /query
-Query the RAG system with options for different search modes.
-
-```bash
-curl -X POST "http://localhost:9621/query" \
-    -H "Content-Type: application/json" \
-    -d '{"query": "Your question here", "mode": "hybrid"}'
-```
-
-#### POST /query/stream
-Stream responses from the RAG system.
-
-```bash
-curl -X POST "http://localhost:9621/query/stream" \
-    -H "Content-Type: application/json" \
-    -d '{"query": "Your question here", "mode": "hybrid"}'
-```
-
-### Document Management Endpoints
-
-#### POST /documents/text
-Insert text directly into the RAG system.
-
-```bash
-curl -X POST "http://localhost:9621/documents/text" \
-    -H "Content-Type: application/json" \
-    -d '{"text": "Your text content here", "description": "Optional description"}'
-```
-
-#### POST /documents/file
-Upload a single file to the RAG system.
-
-```bash
-curl -X POST "http://localhost:9621/documents/file" \
-    -F "file=@/path/to/your/document.txt" \
-    -F "description=Optional description"
-```
-
-#### POST /documents/batch
-Upload multiple files at once.
-
-```bash
-curl -X POST "http://localhost:9621/documents/batch" \
-    -F "files=@/path/to/doc1.txt" \
-    -F "files=@/path/to/doc2.txt"
-```
-
-#### DELETE /documents
-Clear all documents from the RAG system.
-
-```bash
-curl -X DELETE "http://localhost:9621/documents"
-```
-
-### Utility Endpoints
-
-#### GET /health
-Check server health and configuration.
-
-```bash
-curl "http://localhost:9621/health"
-```
-
-## Development
-Contribute to the project: [Guide](contributor-readme.MD)
-
-### Running in Development Mode
-
-For LoLLMs:
-```bash
-uvicorn lollms_lightrag_server:app --reload --port 9621
-```
-
-For Ollama:
-```bash
-uvicorn ollama_lightrag_server:app --reload --port 9621
-```
-
-For OpenAI:
-```bash
-uvicorn openai_lightrag_server:app --reload --port 9621
-```
-For Azure OpenAI:
-```bash
-uvicorn azure_openai_lightrag_server:app --reload --port 9621
-```
-### API Documentation
-
-When any server is running, visit:
-- Swagger UI: http://localhost:9621/docs
-- ReDoc: http://localhost:9621/redoc
-
-### Testing API Endpoints
-
-You can test the API endpoints using the provided curl commands or through the Swagger UI interface. Make sure to:
-1. Start the appropriate backend service (LoLLMs, Ollama, or OpenAI)
-2. Start the RAG server
-3. Upload some documents using the document management endpoints
-4. Query the system using the query endpoints
-
-### Important Features
-
-#### Automatic Document Vectorization
-When starting any of the servers with the `--input-dir` parameter, the system will automatically:
-1. Scan the specified directory for documents
-2. Check for existing vectorized content in the database
-3. Only vectorize new documents that aren't already in the database
-4. Make all content immediately available for RAG queries
-
-This intelligent caching mechanism:
-- Prevents unnecessary re-vectorization of existing documents
-- Reduces startup time for subsequent runs
-- Preserves system resources
-- Maintains consistency across restarts
-
-### Example Usage
-
-#### LoLLMs RAG Server
-
-```bash
-# Start server with automatic document vectorization
-# Only new documents will be vectorized, existing ones will be loaded from cache
-lollms-lightrag-server --input-dir ./my_documents --port 8080
-```
-
-#### Ollama RAG Server
-
-```bash
-# Start server with automatic document vectorization
-# Previously vectorized documents will be loaded from the database
-ollama-lightrag-server --input-dir ./my_documents --port 8080
-```
-
-#### OpenAI RAG Server
-
-```bash
-# Start server with automatic document vectorization
-# Existing documents are retrieved from cache, only new ones are processed
-openai-lightrag-server --input-dir ./my_documents --port 9624
-```
-
-#### Azure OpenAI RAG Server
-
-```bash
-# Start server with automatic document vectorization
-# Existing documents are retrieved from cache, only new ones are processed
-azure-openai-lightrag-server --input-dir ./my_documents --port 9624
-```
-
-**Important Notes:**
-- The `--input-dir` parameter enables automatic document processing at startup
-- Documents already in the database are not re-vectorized
-- Only new documents in the input directory will be processed
-- This optimization significantly reduces startup time for subsequent runs
-- The working directory (`--working-dir`) stores the vectorized documents database
+The documentation can be found [https://github.com/ParisNeo/LightRAG/blob/main/docs/LightRagAPI.md](here)
 
 ## Star History
 
