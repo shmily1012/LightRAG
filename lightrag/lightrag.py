@@ -58,7 +58,6 @@ config = configparser.ConfigParser()
 config.read("config.ini", "utf-8")
 
 
-@final
 @dataclass
 class LightRAG:
     """LightRAG: Simple and Fast Retrieval-Augmented Generation."""
