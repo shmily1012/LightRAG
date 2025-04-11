@@ -32,6 +32,8 @@ POOL_HEALTH_CHECK_INTERVAL = 30  # seconds
 MAX_RETRIES = 3
 RETRY_ON_TIMEOUT = True
 RETRY_ON_ERROR = True
+RETRY_DELAY = 0.1  # Initial delay between retries in seconds
+RETRY_MAX_DELAY = 1.0  # Maximum delay between retries in seconds
 
 # Concurrency control settings
 MAX_CONCURRENT_OPERATIONS = 10  # Maximum number of concurrent Redis operations
@@ -46,12 +48,11 @@ class RedisKVStorage(BaseKVStorage):
             "REDIS_URI", config.get("redis", "uri", fallback="redis://localhost:6379")
         )
         
-        # Configure retry strategy
+        # Configure retry strategy with correct parameters
         retry = Retry(
-            ExponentialBackoff(),
-            MAX_RETRIES,
-            retry_on_timeout=RETRY_ON_TIMEOUT,
-            retry_on_error=RETRY_ON_ERROR
+            backoff=ExponentialBackoff(cap=RETRY_MAX_DELAY, base=RETRY_DELAY),
+            retries=MAX_RETRIES,
+            supported_errors={RedisError, ConnectionError}
         )
         
         # Create a connection pool with enhanced configuration
@@ -62,7 +63,9 @@ class RedisKVStorage(BaseKVStorage):
             socket_timeout=SOCKET_TIMEOUT,
             socket_connect_timeout=SOCKET_CONNECT_TIMEOUT,
             health_check_interval=POOL_HEALTH_CHECK_INTERVAL,
-            retry=retry
+            retry=retry,
+            retry_on_timeout=RETRY_ON_TIMEOUT,
+            retry_on_error=RETRY_ON_ERROR
         )
         
         self._redis = Redis(connection_pool=self._pool)
