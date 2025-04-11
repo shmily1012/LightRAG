@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Union, final
 import numpy as np
 import configparser
+import traceback
 
 from lightrag.types import KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphEdge
 
@@ -69,12 +70,68 @@ class PostgreSQLDB:
             logger.info(
                 f"PostgreSQL, Connected to database at {self.host}:{self.port}/{self.database}"
             )
+            
+            # Add this line to call check_tables
+            await self.check_tables()
+
+        except asyncpg.exceptions.InvalidCatalogNameError:
+            await self.create_database(bd_name=self.database)
+            self.pool = await asyncpg.create_pool(  # type: ignore
+                user=self.user,
+                password=self.password,
+                database=self.database,
+                host=self.host,
+                port=self.port,
+                min_size=1,
+                max_size=self.max,
+            )
+
+            logger.info(
+                f"PostgreSQL, Connected to database at {self.host}:{self.port}/{self.database}"
+            )
+            
+            # Add this line to call check_tables
+            await self.check_tables()
+
         except Exception as e:
             logger.error(
                 f"PostgreSQL, Failed to connect database at {self.host}:{self.port}/{self.database}, Got:{e}"
             )
             raise
+        
+    # Asynchronous function to create a connection to the PostgreSQL database
+    async def create_connection(self, db_name):
+        logger.info(f"Attempting to connect to {db_name} database")
+        try:
+            conn = await asyncpg.connect(
+                database=db_name,
+                user=self.user,
+                password=self.password,
+                host=self.host,
+                port=self.port
+            )
+            logger.info(f"Connection to {db_name} database successful")
+            return conn
+        except Exception as e:
+            logger.error(f"Error connecting to {db_name} database: {e}")
+            return None
 
+    # Asynchronous function to create the database if it does not exist
+    async def create_database(self, bd_name):
+        logger.info("Connecting to the default 'postgres' database")
+        conn = await self.create_connection('postgres')  # Connect to the default 'postgres' database
+        if conn is None:
+            return
+
+        try:
+            logger.info(f"Creating database {bd_name}")
+            await conn.execute(f"CREATE DATABASE {bd_name};")
+            logger.info(f"Database {bd_name} created successfully")
+        except Exception as e:
+            logger.error(f"Error creating database {bd_name}: {e}")
+        finally:
+            await conn.close()
+        
     @staticmethod
     async def configure_age(connection: asyncpg.Connection, graph_name: str) -> None:
         """Set the Apache AGE environment and creates a graph if it does not exist.
@@ -168,6 +225,7 @@ class PostgreSQLDB:
                         data = None
                 return data
             except Exception as e:
+                traceback.print_exc()
                 logger.error(f"PostgreSQL database, error:{e}")
                 raise
 
@@ -185,7 +243,7 @@ class PostgreSQLDB:
                     await self.configure_age(connection, graph_name)  # type: ignore
                 elif with_age and not graph_name:
                     raise ValueError("Graph name is required when with_age is True")
-
+                print(f'{sql=}')
                 if data is None:
                     await connection.execute(sql)  # type: ignore
                 else:

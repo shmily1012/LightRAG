@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import pipmaster as pm
 import configparser
 from contextlib import asynccontextmanager
-
+import traceback
 if not pm.is_installed("redis"):
     pm.install("redis")
 
@@ -52,12 +52,15 @@ class RedisKVStorage(BaseKVStorage):
         try:
             yield self._redis
         except ConnectionError as e:
+            traceback.print_exc()
             logger.error(f"Redis connection error in {self.namespace}: {e}")
             raise
         except RedisError as e:
+            traceback.print_exc()
             logger.error(f"Redis operation error in {self.namespace}: {e}")
             raise
         except Exception as e:
+            traceback.print_exc()
             logger.error(
                 f"Unexpected error in Redis operation for {self.namespace}: {e}"
             )
@@ -123,7 +126,8 @@ class RedisKVStorage(BaseKVStorage):
 
                 for k in data:
                     data[k]["_id"] = k
-            except json.JSONEncodeError as e:
+            except ValueError as e:
+                traceback.print_exc()
                 logger.error(f"JSON encode error during upsert: {e}")
                 raise
 
