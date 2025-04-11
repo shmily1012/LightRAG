@@ -265,13 +265,37 @@ class RedisKVStorage(BaseKVStorage):
         await self.close()
 
     async def get_by_id(self, id: str) -> dict[str, Any] | None:
-        async with self._get_redis_connection() as redis:
-            try:
-                data = await redis.get(f"{self.namespace}:{id}")
-                return json.loads(data) if data else None
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON decode error for id {id}: {e}")
-                return None
+        """Get a single item by ID with proper connection management and concurrency control.
+        
+        Args:
+            id: The ID of the item to retrieve
+            
+        Returns:
+            The item data as a dictionary, or None if not found
+        """
+        async with self._semaphore:  # Control concurrent access
+            async with self._get_redis_connection() as redis:
+                try:
+                    # Use pipeline for efficiency even with single operation
+                    pipe = redis.pipeline()
+                    pipe.get(f"{self.namespace}:{id}")
+                    [data] = await pipe.execute()
+                    
+                    if not data:
+                        return None
+                        
+                    try:
+                        return json.loads(data)
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON decode error for id {id}: {e}")
+                        return None
+                except RedisError as e:
+                    logger.error(f"Redis error in get_by_id for {id}: {e}")
+                    return None
+                except Exception as e:
+                    logger.error(f"Unexpected error in get_by_id for {id}: {e}")
+                    traceback.print_exc()
+                    return None
 
     async def index_done_callback(self) -> None:
         # Redis handles persistence automatically
